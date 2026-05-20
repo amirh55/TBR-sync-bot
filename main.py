@@ -1,5 +1,6 @@
 import os
 import time
+import sqlite3
 import requests
 from telegram import Bot
 from rubpy import Client
@@ -26,6 +27,49 @@ SOURCE = os.getenv("SOURCE_CHANNEL")
 tg_bot = Bot(token=TELEGRAM_TOKEN)
 rubika_client = Client(session="sync_session", auth_token=RUBIKA_AUTH)
 
+# ----------------- بخش پایگاه داده (SQLite) -----------------
+def init_db():
+    """ساخت جدول دیتابیس در صورت عدم وجود"""
+    conn = sqlite3.connect("bot_database.db")
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS processed_messages (
+            id TEXT PRIMARY KEY,
+            media_group_id TEXT
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+def is_msg_processed(msg_id):
+    """بررسی تکراری نبودن پیام"""
+    conn = sqlite3.connect("bot_database.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT 1 FROM processed_messages WHERE id = ?", (msg_id,))
+    res = cursor.fetchone()
+    conn.close()
+    return res is not None
+
+def is_media_group_processed(media_group_id):
+    """بررسی اینکه آیا عکس اول این آلبوم قبلاً فرستاده شده یا نه"""
+    if not media_group_id:
+        return False
+    conn = sqlite3.connect("bot_database.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT 1 FROM processed_messages WHERE media_group_id = ?", (media_group_id,))
+    res = cursor.fetchone()
+    conn.close()
+    return res is not None
+
+def save_msg(msg_id, media_group_id=None):
+    """ذخیره پیام فرستاده شده در دیتابیس"""
+    conn = sqlite3.connect("bot_database.db")
+    cursor = conn.cursor()
+    cursor.execute("INSERT OR IGNORE INTO processed_messages (id, media_group_id) VALUES (?, ?)", (msg_id, media_group_id))
+    conn.commit()
+    conn.close()
+# -----------------------------------------------------------
+
 def download_from_bale(file_id):
     res = requests.get(f"https://api.bale.ai/bot{BALE_TOKEN}/getFile", params={"file_id": file_id}).json()
     if res.get("ok"):
@@ -41,7 +85,7 @@ def download_from_bale(file_id):
 def send_to_destinations(text, file_path=None, file_type=None, skip_tg=False, skip_bale=False, skip_rubika=False):
     """ارسال هوشمند پست به مقصدهایی که منبع نیستند"""
     
-    # ۱. ارسال به تلگرام (اگر منبع نباشد)
+    # ۱. ارسال به تلگرام
     if not skip_tg:
         try:
             if file_type == "photo":
@@ -53,7 +97,7 @@ def send_to_destinations(text, file_path=None, file_type=None, skip_tg=False, sk
             print("✓ به تلگرام فرستاده شد.")
         except Exception as e: print(f"✗ خطا در تلگرام: {e}")
 
-    # ۲. ارسال به بله (اگر منبع نباشد)
+    # ۲. ارسال به بله
     if not skip_bale:
         try:
             url = f"https://api.bale.ai/bot{BALE_TOKEN}"
@@ -66,7 +110,7 @@ def send_to_destinations(text, file_path=None, file_type=None, skip_tg=False, sk
             print("✓ به بله فرستاده شد.")
         except Exception as e: print(f"✗ خطا در بله: {e}")
 
-    # ۳. ارسال به روبیکا (اگر منبع نباشد)
+    # ۳. ارسال به روبیکا
     if not skip_rubika:
         try:
             if file_type == "photo": rubika_client.send_photo(RUBIKA_CHANNEL, file_path, caption=text)
@@ -79,7 +123,7 @@ def send_to_destinations(text, file_path=None, file_type=None, skip_tg=False, sk
     if file_path and os.path.exists(file_path):
         os.remove(file_path)
 
-# --- بخش کرولر و دریافت پیام‌ها بر اساس منبع انتخابی ---
+# --- بخش مانیتورینگ کانال‌ها ---
 
 def listen_bale():
     offset = None
@@ -93,9 +137,17 @@ def listen_bale():
                     msg = update.get("channel_post")
                     if not msg or str(msg.get("chat", {}).get("username")) != BALE_CHANNEL.replace("@", ""): continue
                     
-                    text = msg.get("caption") or msg.get("text")
-                    file_id, file_type = None, None
+                    msg_id = f"bale_{msg.get('message_id')}"
+                    if is_msg_processed(msg_id): continue
                     
+                    media_group_id = msg.get("media_group_id")
+                    text = msg.get("caption") or msg.get("text")
+                    
+                    # مدیریت هوشمند آلبوم: اگر این آلبوم قبلاً دیده شده، کپشن را حذف کن
+                    if media_group_id and is_media_group_processed(media_group_id):
+                        text = None
+                    
+                    file_id, file_type = None, None
                     if "photo" in msg:
                         file_id, file_type = msg["photo"][-1]["file_id"], "photo"
                     elif "video" in msg:
@@ -106,11 +158,12 @@ def listen_bale():
                         if f_path: send_to_destinations(text, f_path, file_type, skip_bale=True)
                     elif text:
                         send_to_destinations(text, skip_bale=True)
+                        
+                    save_msg(msg_id, media_group_id)
         except Exception as e: time.sleep(5)
 
 def listen_telegram():
     print("📡 ربات روی کانال تلگرام قفل شد. در حال مانیتورینگ...")
-    # متد دریافت پیام از تلگرام (در سرور خارج کار میکند)
     offset = None
     while True:
         try:
@@ -120,9 +173,16 @@ def listen_telegram():
                 msg = u.channel_post
                 if not msg or str(msg.chat.username) != TELEGRAM_CHANNEL.replace("@", ""): continue
                 
-                text = msg.caption or msg.text
-                file_path, file_type = None, None
+                msg_id = f"tg_{msg.message_id}"
+                if is_msg_processed(msg_id): continue
                 
+                media_group_id = msg.media_group_id
+                text = msg.caption or msg.text
+                
+                if media_group_id and is_media_group_processed(media_group_id):
+                    text = None
+                
+                file_path, file_type = None, None
                 if msg.photo:
                     file = tg_bot.get_file(msg.photo[-1].file_id)
                     file_path = file.download_to_drive()
@@ -133,11 +193,11 @@ def listen_telegram():
                     file_type = "video"
                     
                 send_to_destinations(text, file_path, file_type, skip_tg=True)
+                save_msg(msg_id, media_group_id)
         except Exception as e: time.sleep(5)
 
 def listen_rubika():
     print("📡 ربات روی کانال روبیکا قفل شد. در حال مانیتورینگ...")
-    # روبیکا وب‌هوک یا گت‌آپدیت استاندارد ندارد، آخرین پیام را چک میکنیم
     last_msg_id = None
     while True:
         try:
@@ -150,6 +210,9 @@ def listen_rubika():
                 
                 if latest.message_id > last_msg_id:
                     last_msg_id = latest.message_id
+                    msg_id = f"rubika_{latest.message_id}"
+                    if is_msg_processed(msg_id): continue
+                    
                     text = latest.text
                     file_path, file_type = None, None
                     
@@ -161,10 +224,12 @@ def listen_rubika():
                         file_type = "video"
                         
                     send_to_destinations(text, file_path, file_type, skip_rubika=True)
+                    save_msg(msg_id)
         except Exception as e: pass
         time.sleep(3)
 
 if __name__ == "__main__":
+    init_db() # راه‌اندازی دیتابیس
     if SOURCE == "bale": listen_bale()
     elif SOURCE == "telegram": listen_telegram()
     elif SOURCE == "rubika": listen_rubika()
