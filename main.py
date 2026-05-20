@@ -110,16 +110,19 @@ def send_to_destinations(text, file_path=None, file_type=None, skip_tg=False, sk
             print("✓ به بله فرستاده شد.")
         except Exception as e: print(f"✗ خطا در بله: {e}")
 
-    # ۳. ارسال به روبیکا
+    # ۳. ارسال به روبیکا (هماهنگ با متدهای ناهمگام جدید روبیکا)
     if not skip_rubika:
         try:
-            if file_type == "photo": rubika_client.send_photo(RUBIKA_CHANNEL, file_path, caption=text)
-            elif file_type == "video": rubika_client.send_video(RUBIKA_CHANNEL, file_path, caption=text)
-            elif text: rubika_client.send_message(RUBIKA_CHANNEL, text)
+            with rubika_client as bot:
+                if file_type == "photo" or file_type == "video":
+                    bot.send_file(RUBIKA_CHANNEL, file_path, caption=text)
+                elif text:
+                    bot.send_message(RUBIKA_CHANNEL, text)
             print("✓ به روبیکا فرستاده شد.")
-        except Exception as e: print(f"✗ خطا در روبیکا: {e}")
+        except Exception as e: 
+            print(f"✗ خطا در روبیکا: {e}")
 
-    # حذف فایل موقت
+    # حذف فایل موقت از روی سرور جهت مدیریت هارد
     if file_path and os.path.exists(file_path):
         os.remove(file_path)
 
@@ -143,7 +146,7 @@ def listen_bale():
                     media_group_id = msg.get("media_group_id")
                     text = msg.get("caption") or msg.get("text")
                     
-                    # مدیریت هوشمند آلبوم: اگر این آلبوم قبلاً دیده شده، کپشن را حذف کن
+                    # مدیریت آلبوم: اگر این آلبوم قبلاً دیده شده، کپشن را حذف کن تا اسپم نشود
                     if media_group_id and is_media_group_processed(media_group_id):
                         text = None
                     
@@ -201,35 +204,36 @@ def listen_rubika():
     last_msg_id = None
     while True:
         try:
-            messages = rubika_client.get_messages(RUBIKA_CHANNEL)
-            if messages:
-                latest = messages[0]
-                if last_msg_id is None:
-                    last_msg_id = latest.message_id
-                    continue
-                
-                if latest.message_id > last_msg_id:
-                    last_msg_id = latest.message_id
-                    msg_id = f"rubika_{latest.message_id}"
-                    if is_msg_processed(msg_id): continue
+            with rubika_client as bot:
+                messages = bot.get_messages(RUBIKA_CHANNEL)
+                if messages:
+                    latest = messages[0]
+                    if last_msg_id is None:
+                        last_msg_id = latest.message_id
+                        continue
                     
-                    text = latest.text
-                    file_path, file_type = None, None
-                    
-                    if latest.type == "Photo":
-                        file_path = rubika_client.download(latest.inline_link)
-                        file_type = "photo"
-                    elif latest.type == "Video":
-                        file_path = rubika_client.download(latest.inline_link)
-                        file_type = "video"
+                    if latest.message_id > last_msg_id:
+                        last_msg_id = latest.message_id
+                        msg_id = f"rubika_{latest.message_id}"
+                        if is_msg_processed(msg_id): continue
                         
-                    send_to_destinations(text, file_path, file_type, skip_rubika=True)
-                    save_msg(msg_id)
+                        text = latest.text
+                        file_path, file_type = None, None
+                        
+                        if latest.type == "Photo":
+                            file_path = bot.download(latest.inline_link)
+                            file_type = "photo"
+                        elif latest.type == "Video":
+                            file_path = bot.download(latest.inline_link)
+                            file_type = "video"
+                            
+                        send_to_destinations(text, file_path, file_type, skip_rubika=True)
+                        save_msg(msg_id)
         except Exception as e: pass
         time.sleep(3)
 
 if __name__ == "__main__":
-    init_db() # راه‌اندازی دیتابیس
+    init_db() # ایجاد خودکار دیتابیس لوکال SQLite
     if SOURCE == "bale": listen_bale()
     elif SOURCE == "telegram": listen_telegram()
     elif SOURCE == "rubika": listen_rubika()
