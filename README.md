@@ -38,7 +38,7 @@ sudo npm install pm2 -g
 # ۲. روشن کردن ربات در پس‌زمینه با یک نام دلخواه (مثلاً tbr-bot)
 ```bash
 pm2 start venv/bin/python --name "tbr-bot" -- main.py
-
+```
 # ۳. تنظیم لینوکس برای روشن کردن خودکار ربات بعد از ری‌استارت شدن سرور
 ```bash
 pm2 startup
