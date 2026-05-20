@@ -14,7 +14,7 @@
 
 ### ۱. کلون کردن پروژه و ورود به پوشه
 ```bash
-git clone [https://github.com/amirh55/TBR-sync-bot.git](https://github.com/amirh55/TBR-sync-bot.git)
+git clone https://github.com/amirh55/TBR-sync-bot.git
 cd TBR-sync-bot
 ```
 
