@@ -16,40 +16,51 @@
 ```bash
 git clone [https://github.com/amirh55/TBR-sync-bot.git](https://github.com/amirh55/TBR-sync-bot.git)
 cd TBR-sync-bot
+```
 
 ### ۲. ساخت محیط مجازی (Virtual Environment)
+```bash
 python3 -m venv venv
 source venv/bin/activate
+```
 
 ۳. اجرای اسکریپت راه‌انداز هوشمند
 این دستور تمام کتابخانه‌های مورد نیاز را نصب کرده و سپس توکن‌ها و آیدی کانال‌ها را به صورت تعاملی از شما می‌پرسد و فایل تنظیمات را می‌سازد:
+```bash
 python3 setup.py
-
+```
 🛠️ روشن نگه‌داشتن ربات پس از بستن ترمینال (بسیار مهم)
 # ۱. نصب ابزار PM2 روی سرور (فقط یک‌بار)
+```bash
 sudo apt update && sudo apt install nodejs npm -y
 sudo npm install pm2 -g
-
+```
 # ۲. روشن کردن ربات در پس‌زمینه با یک نام دلخواه (مثلاً tbr-bot)
+```bash
 pm2 start venv/bin/python --name "tbr-bot" -- main.py
 
 # ۳. تنظیم لینوکس برای روشن کردن خودکار ربات بعد از ری‌استارت شدن سرور
+```bash
 pm2 startup
 pm2 save
-
+```
 دستورات کاربردی مدیریت ربات در PM2:
 # مشاهده وضعیت و لیست ربات‌های روشن
+```bash
 pm2 list
-
+```
 # مشاهده لاگ‌ها و گزارش کارکرد ربات در لحظه
+```bash
 pm2 logs tbr-bot
-
+```
 # خاموش کردن ربات
+```bash
 pm2 stop tbr-bot
-
+```
 # روشن کردن مجدد ربات
+```bash
 pm2 restart tbr-bot
-
+```
 📝 نیازمندی‌ها
 Python 3.8 یا بالاتر
 
