@@ -5,7 +5,7 @@ import logging
 import threading
 import requests
 from telegram import Bot
-from rubpy import Client
+from rubpy import Bot as Client
 from dotenv import load_dotenv
 
 # ===================== راه‌اندازی لاگینگ =====================
