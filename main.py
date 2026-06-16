@@ -35,7 +35,7 @@ if not BALE_CHANNEL:
     exit(1)
 
 # ایجاد نمونه از ربات‌ها
-bale_bot = Bot(token=BALE_TOKEN)
+bale_bot = Bot(token=BALE_TOKEN, base_url="https://tapi.bale.ai/bot")
 telegram_bot = TgBot(token=TELEGRAM_TOKEN)
 
 # دایرکتوری موقت
