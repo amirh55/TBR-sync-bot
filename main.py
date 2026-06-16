@@ -4,8 +4,8 @@ import sqlite3
 import logging
 import threading
 import requests
-from telegram import Bot
-from rubpy import Bot as Client
+from telegram import Bot as TgBot
+from bale import Bot, Message, File
 from dotenv import load_dotenv
 
 # ===================== راه‌اندازی لاگینگ =====================
