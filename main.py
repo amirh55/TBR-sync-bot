@@ -1,10 +1,10 @@
 import os
+import asyncio
 import logging
 from pathlib import Path
 from dotenv import load_dotenv
 
-from bale import Bot, Message, Updater
-from bale.handlers import MessageHandler, Filters
+from bale import Bot, Message
 from telegram import Bot as TgBot
 from telegram.error import TelegramError
 
@@ -32,6 +32,7 @@ if not TELEGRAM_TOKEN:
     exit(1)
 if not BALE_CHANNEL:
     log.error("❌ آیدی کانال بله در فایل .env تنظیم نشده است!")
+    log.error("لطفاً متغیر BALE_CHANNEL را در فایل .env تعریف کنید.")
     exit(1)
 
 # ایجاد نمونه از ربات‌ها
@@ -45,7 +46,7 @@ TEMP_DIR.mkdir(exist_ok=True)
 # ------------------- توابع کمکی -------------------
 
 def download_from_bale(file_id: str) -> str | None:
-    """دانلود فایل از بله"""
+    """دانلود فایل از بله (همگام)"""
     try:
         file_info = bale_bot.get_file(file_id)
         file_path = TEMP_DIR / file_info.file_name
@@ -57,7 +58,7 @@ def download_from_bale(file_id: str) -> str | None:
         return None
 
 def send_to_destinations(text: str, file_path: str = None, file_type: str = None):
-    """ارسال پیام به تمام مقصدها"""
+    """ارسال پیام به تمام مقصدها (همگام)"""
     # ارسال به بله
     if BALE_CHANNEL:
         try:
@@ -99,62 +100,64 @@ def send_to_destinations(text: str, file_path: str = None, file_type: str = None
         except TelegramError as e:
             log.error(f"❌ خطا در ارسال به تلگرام: {e}")
 
-# ------------------- تابع پردازش پیام -------------------
+# ------------------- تابع اصلی (ناهمگام) -------------------
 
-def handle_message(update, context):
-    """پردازش پیام‌های جدید از کانال بله"""
-    msg = update.message
-    if not msg or msg.from_user.is_bot:
-        return
-
-    # فقط پیام‌های کانال را پردازش کن (نه پیام‌های خصوصی)
-    if msg.chat.type != "channel":
-        return
-
-    log.info(f"📩 پیام جدید از کانال بله دریافت شد.")
-
-    text = msg.text or msg.caption or ""
-    file_id = None
-    file_type = None
-    file_path = None
-
-    # تشخیص نوع فایل
-    if msg.photo:
-        file_id = msg.photo[-1].file_id
-        file_type = "photo"
-    elif msg.video:
-        file_id = msg.video.file_id
-        file_type = "video"
-    elif msg.document:
-        file_id = msg.document.file_id
-        file_type = "document"
-
-    # دانلود فایل (اگر وجود داشته باشد)
-    if file_id:
-        file_path = download_from_bale(file_id)
-        if not file_path:
-            log.warning("⚠️ دانلود فایل ناموفق بود، فقط متن ارسال می‌شود.")
-
-    # ارسال به مقصدها
-    send_to_destinations(text, file_path, file_type)
-
-# ------------------- تابع اصلی -------------------
-
-def main():
+async def main():
     log.info("🚀 ربات همگام‌سازی راه‌اندازی شد.")
     log.info(f"👀 در حال گوش‌دادن به کانال بله: {BALE_CHANNEL}")
 
-    # ایجاد Updater
-    updater = Updater(token=BALE_TOKEN)
-    dp = updater.dispatcher
+    last_processed_id = None
 
-    # افزودن هندلر برای پیام‌های کانال
-    dp.add_handler(MessageHandler(Filters.chat_type.channel, handle_message))
+    while True:
+        try:
+            # دریافت پیام‌های جدید (با await)
+            updates = await bale_bot.get_updates(offset=last_processed_id)
 
-    # شروع polling
-    updater.start_polling()
-    log.info("✅ ربات در حال اجرا است. برای توقف Ctrl+C را بزنید.")
-    updater.idle()
+            for update in updates:
+                if update.message:
+                    msg = update.message
+
+                    # نادیده گرفتن پیام‌های خود ربات
+                    if msg.from_user.is_bot:
+                        continue
+
+                    # فقط پیام‌های کانال را پردازش کن
+                    if msg.chat.type != "channel":
+                        continue
+
+                    log.info(f"📩 پیام جدید از کانال بله دریافت شد.")
+
+                    text = msg.text or msg.caption or ""
+                    file_id = None
+                    file_type = None
+                    file_path = None
+
+                    # تشخیص نوع فایل
+                    if msg.photo:
+                        file_id = msg.photo[-1].file_id
+                        file_type = "photo"
+                    elif msg.video:
+                        file_id = msg.video.file_id
+                        file_type = "video"
+                    elif msg.document:
+                        file_id = msg.document.file_id
+                        file_type = "document"
+
+                    # دانلود فایل (در صورت وجود)
+                    if file_id:
+                        file_path = download_from_bale(file_id)
+                        if not file_path:
+                            log.warning("⚠️ دانلود فایل ناموفق بود، فقط متن ارسال می‌شود.")
+
+                    # ارسال به مقصدها
+                    send_to_destinations(text, file_path, file_type)
+
+                    # به‌روزرسانی last_processed_id
+                    last_processed_id = update.update_id + 1
+
+        except Exception as e:
+            log.error(f"❌ خطا در حلقه اصلی: {e}")
+            await asyncio.sleep(5)  # در صورت خطا، ۵ ثانیه صبر کن
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
