@@ -32,7 +32,6 @@ if not TELEGRAM_TOKEN:
     exit(1)
 if not BALE_CHANNEL:
     log.error("❌ آیدی کانال بله در فایل .env تنظیم نشده است!")
-    log.error("لطفاً متغیر BALE_CHANNEL را در فایل .env تعریف کنید.")
     exit(1)
 
 # ایجاد نمونه از ربات‌ها
@@ -106,54 +105,67 @@ async def main():
     log.info("🚀 ربات همگام‌سازی راه‌اندازی شد.")
     log.info(f"👀 در حال گوش‌دادن به کانال بله: {BALE_CHANNEL}")
 
+    # تست اتصال به بله با دریافت اطلاعات ربات
+    try:
+        me = await bale_bot.get_me()
+        log.info(f"✅ اتصال به بله برقرار شد. ربات: @{me.username}")
+    except Exception as e:
+        log.error(f"❌ اتصال به بله ناموفق: {e}")
+        log.error("لطفاً توکن BALE_TOKEN را بررسی کنید.")
+        return
+
     last_processed_id = None
 
     while True:
         try:
-            # دریافت پیام‌های جدید (با await)
-            updates = await bale_bot.get_updates(offset=last_processed_id)
+            # دریافت پیام‌های جدید با await
+            updates = await bale_bot.get_updates(offset=last_processed_id, timeout=30)
 
             for update in updates:
-                if update.message:
-                    msg = update.message
+                if not hasattr(update, 'message'):
+                    continue
 
-                    # نادیده گرفتن پیام‌های خود ربات
-                    if msg.from_user.is_bot:
-                        continue
+                msg = update.message
+                if not msg:
+                    continue
 
-                    # فقط پیام‌های کانال را پردازش کن
-                    if msg.chat.type != "channel":
-                        continue
+                # نادیده گرفتن پیام‌های خود ربات
+                if msg.from_user.is_bot:
+                    continue
 
-                    log.info(f"📩 پیام جدید از کانال بله دریافت شد.")
+                # فقط پیام‌های کانال را پردازش کن
+                if msg.chat.type != "channel":
+                    continue
 
-                    text = msg.text or msg.caption or ""
-                    file_id = None
-                    file_type = None
-                    file_path = None
+                log.info(f"📩 پیام جدید از کانال بله دریافت شد.")
 
-                    # تشخیص نوع فایل
-                    if msg.photo:
-                        file_id = msg.photo[-1].file_id
-                        file_type = "photo"
-                    elif msg.video:
-                        file_id = msg.video.file_id
-                        file_type = "video"
-                    elif msg.document:
-                        file_id = msg.document.file_id
-                        file_type = "document"
+                text = msg.text or msg.caption or ""
+                file_id = None
+                file_type = None
+                file_path = None
 
-                    # دانلود فایل (در صورت وجود)
-                    if file_id:
-                        file_path = download_from_bale(file_id)
-                        if not file_path:
-                            log.warning("⚠️ دانلود فایل ناموفق بود، فقط متن ارسال می‌شود.")
+                # تشخیص نوع فایل
+                if msg.photo:
+                    file_id = msg.photo[-1].file_id
+                    file_type = "photo"
+                elif msg.video:
+                    file_id = msg.video.file_id
+                    file_type = "video"
+                elif msg.document:
+                    file_id = msg.document.file_id
+                    file_type = "document"
 
-                    # ارسال به مقصدها
-                    send_to_destinations(text, file_path, file_type)
+                # دانلود فایل (در صورت وجود)
+                if file_id:
+                    file_path = download_from_bale(file_id)
+                    if not file_path:
+                        log.warning("⚠️ دانلود فایل ناموفق بود، فقط متن ارسال می‌شود.")
 
-                    # به‌روزرسانی last_processed_id
-                    last_processed_id = update.update_id + 1
+                # ارسال به مقصدها
+                send_to_destinations(text, file_path, file_type)
+
+                # به‌روزرسانی last_processed_id
+                last_processed_id = update.update_id + 1
 
         except Exception as e:
             log.error(f"❌ خطا در حلقه اصلی: {e}")
