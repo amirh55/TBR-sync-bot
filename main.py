@@ -4,7 +4,7 @@ import logging
 from pathlib import Path
 from dotenv import load_dotenv
 
-from bale import Bot, Message
+from bale import Bot, Message, InputFile
 from telegram import Bot as TgBot
 from telegram.error import TelegramError
 
@@ -43,16 +43,16 @@ TEMP_DIR.mkdir(exist_ok=True)
 async def download_from_bale(bale_bot_instance, file_id: str, file_type: str) -> str | None:
     """دانلود فایل از بله (ناهمگام)"""
     try:
-        # در python-bale-bot متد get_file محتوای فایل را به صورت bytes برمی‌گرداند
-        file_bytes = await bale_bot_instance.get_file(file_id)
+        # در python-bale-bot متد get_file یک شیء File برمی‌گرداند
+        file_info = await bale_bot_instance.get_file(file_id)
         
         # ساخت نام فایل موقت
         file_name = f"{file_type}_{file_id}.file"
         file_path = TEMP_DIR / file_name
         
-        # ذخیره bytes در فایل
+        # استفاده از save_to_memory برای ذخیره محتوای فایل در دیسک
         with open(file_path, 'wb') as f:
-            f.write(file_bytes)
+            await file_info.save_to_memory(f)
             
         log.info(f"📥 فایل از بله دانلود شد: {file_path}")
         return str(file_path)
@@ -66,13 +66,19 @@ async def send_to_destinations(bale_bot_instance, telegram_bot_instance, text: s
     if BALE_CHANNEL:
         try:
             if file_path and file_type:
-                # کتابخانه بله خودش فایل را از روی مسیر باز می‌کند
-                if file_type == "photo":
-                    await bale_bot_instance.send_photo(BALE_CHANNEL, file_path, caption=text)
-                elif file_type == "video":
-                    await bale_bot_instance.send_video(BALE_CHANNEL, file_path, caption=text)
-                elif file_type == "document":
-                    await bale_bot_instance.send_document(BALE_CHANNEL, file_path, caption=text)
+                # نکته مهم: برای ارسال فایل لوکال، حتماً باید فایل را باز کرده و در InputFile قرار دهیم
+                with open(file_path, 'rb') as f:
+                    input_file = InputFile(f)
+                    if file_type == "photo":
+                        await bale_bot_instance.send_photo(BALE_CHANNEL, input_file, caption=text)
+                    elif file_type == "video":
+                        await bale_bot_instance.send_video(BALE_CHANNEL, input_file, caption=text)
+                    elif file_type == "document":
+                        await bale_bot_instance.send_document(BALE_CHANNEL, input_file, caption=text)
+                    elif file_type == "animation":
+                        await bale_bot_instance.send_animation(BALE_CHANNEL, input_file, caption=text)
+                    elif file_type == "audio":
+                        await bale_bot_instance.send_audio(BALE_CHANNEL, input_file, caption=text)
             else:
                 await bale_bot_instance.send_message(BALE_CHANNEL, text)
         except Exception as e:
@@ -82,12 +88,17 @@ async def send_to_destinations(bale_bot_instance, telegram_bot_instance, text: s
     if TELEGRAM_CHANNEL:
         try:
             if file_path and file_type:
-                if file_type == "photo":
-                    await telegram_bot_instance.send_photo(TELEGRAM_CHANNEL, file_path, caption=text)
-                elif file_type == "video":
-                    await telegram_bot_instance.send_video(TELEGRAM_CHANNEL, file_path, caption=text)
-                elif file_type == "document":
-                    await telegram_bot_instance.send_document(TELEGRAM_CHANNEL, file_path, caption=text)
+                with open(file_path, 'rb') as f:
+                    if file_type == "photo":
+                        await telegram_bot_instance.send_photo(TELEGRAM_CHANNEL, f, caption=text)
+                    elif file_type == "video":
+                        await telegram_bot_instance.send_video(TELEGRAM_CHANNEL, f, caption=text)
+                    elif file_type == "document":
+                        await telegram_bot_instance.send_document(TELEGRAM_CHANNEL, f, caption=text)
+                    elif file_type == "animation":
+                        await telegram_bot_instance.send_animation(TELEGRAM_CHANNEL, f, caption=text)
+                    elif file_type == "audio":
+                        await telegram_bot_instance.send_audio(TELEGRAM_CHANNEL, f, caption=text)
             else:
                 await telegram_bot_instance.send_message(TELEGRAM_CHANNEL, text)
         except TelegramError as e:
@@ -122,7 +133,7 @@ async def main():
 
         while True:
             try:
-                # دریافت پیام‌های جدید (بدون timeout چون این کتابخانه پشتیبانی نمی‌کند)
+                # دریافت پیام‌های جدید
                 updates = await bale_bot.get_updates(offset=last_processed_id)
 
                 if not updates:
@@ -153,9 +164,9 @@ async def main():
                     file_type = None
                     file_path = None
 
-                    # تشخیص نوع فایل
-                    if msg.photo:
-                        file_id = msg.photo[-1].file_id
+                    # تشخیص نوع فایل - در python-bale-bot لیست عکس‌ها photos نام دارد
+                    if msg.photos:
+                        file_id = msg.photos[-1].file_id
                         file_type = "photo"
                     elif msg.video:
                         file_id = msg.video.file_id
@@ -163,6 +174,12 @@ async def main():
                     elif msg.document:
                         file_id = msg.document.file_id
                         file_type = "document"
+                    elif msg.animation:
+                        file_id = msg.animation.file_id
+                        file_type = "animation"
+                    elif msg.audio:
+                        file_id = msg.audio.file_id
+                        file_type = "audio"
 
                     # دانلود فایل (در صورت وجود)
                     if file_id:
