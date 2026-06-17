@@ -90,43 +90,49 @@ async def download_from_bale(bale_bot_instance, file_id: str, file_type: str) ->
 
 async def send_to_destinations(bale_bot_instance, telegram_bot_instance, text: str, file_path: str = None, file_type: str = None):
     """ارسال پیام به تمام مقصدها (ناهمگام)"""
-    # ارسال به بله
+    
+    # caption فقط در صورتی تنظیم می‌شود که متن غیرخالی باشد
+    caption = text if text else None
+    
+    # ===================== ارسال به بله =====================
     if BALE_CHANNEL:
         try:
             if file_path and file_type:
                 with open(file_path, 'rb') as f:
                     input_file = InputFile(f)
                     if file_type == "photo":
-                        await bale_bot_instance.send_photo(BALE_CHANNEL, input_file, caption=text)
+                        await bale_bot_instance.send_photo(BALE_CHANNEL, input_file, caption=caption)
                     elif file_type == "video":
-                        await bale_bot_instance.send_video(BALE_CHANNEL, input_file, caption=text)
+                        await bale_bot_instance.send_video(BALE_CHANNEL, input_file, caption=caption)
                     elif file_type == "document":
-                        await bale_bot_instance.send_document(BALE_CHANNEL, input_file, caption=text)
+                        await bale_bot_instance.send_document(BALE_CHANNEL, input_file, caption=caption)
                     elif file_type == "animation":
-                        await bale_bot_instance.send_animation(BALE_CHANNEL, input_file, caption=text)
+                        await bale_bot_instance.send_animation(BALE_CHANNEL, input_file, caption=caption)
                     elif file_type == "audio":
-                        await bale_bot_instance.send_audio(BALE_CHANNEL, input_file, caption=text)
-            else:
+                        await bale_bot_instance.send_audio(BALE_CHANNEL, input_file, caption=caption)
+            elif text:
+                # فقط در صورتی پیام متنی ارسال کن که متن واقعاً وجود داشته باشد
                 await bale_bot_instance.send_message(BALE_CHANNEL, text)
         except Exception as e:
             log.error(f"❌ خطا در ارسال به بله: {e}")
 
-    # ارسال به تلگرام
+    # ===================== ارسال به تلگرام =====================
     if TELEGRAM_CHANNEL:
         try:
             if file_path and file_type:
                 with open(file_path, 'rb') as f:
                     if file_type == "photo":
-                        await telegram_bot_instance.send_photo(TELEGRAM_CHANNEL, f, caption=text)
+                        await telegram_bot_instance.send_photo(TELEGRAM_CHANNEL, f, caption=caption)
                     elif file_type == "video":
-                        await telegram_bot_instance.send_video(TELEGRAM_CHANNEL, f, caption=text)
+                        await telegram_bot_instance.send_video(TELEGRAM_CHANNEL, f, caption=caption)
                     elif file_type == "document":
-                        await telegram_bot_instance.send_document(TELEGRAM_CHANNEL, f, caption=text)
+                        await telegram_bot_instance.send_document(TELEGRAM_CHANNEL, f, caption=caption)
                     elif file_type == "animation":
-                        await telegram_bot_instance.send_animation(TELEGRAM_CHANNEL, f, caption=text)
+                        await telegram_bot_instance.send_animation(TELEGRAM_CHANNEL, f, caption=caption)
                     elif file_type == "audio":
-                        await telegram_bot_instance.send_audio(TELEGRAM_CHANNEL, f, caption=text)
-            else:
+                        await telegram_bot_instance.send_audio(TELEGRAM_CHANNEL, f, caption=caption)
+            elif text:
+                # فقط در صورتی پیام متنی ارسال کن که متن واقعاً وجود داشته باشد
                 await telegram_bot_instance.send_message(TELEGRAM_CHANNEL, text)
         except TelegramError as e:
             log.error(f"❌ خطا در ارسال به تلگرام: {e}")
@@ -169,12 +175,10 @@ async def main():
                     if not msg:
                         continue
 
-                    # بررسی فرستنده (با استفاده از safe_get برای جلوگیری از ارور dict)
                     from_user = safe_get(msg, 'from_user')
                     if from_user and safe_get(from_user, 'is_bot'):
                         continue
 
-                    # بررسی نوع چت
                     chat = safe_get(msg, 'chat')
                     if safe_get(chat, 'type') != "channel":
                         continue
@@ -186,7 +190,6 @@ async def main():
                     file_type = None
                     file_path = None
 
-                    # استخراج فایل‌ها با safe_get
                     photos = safe_get(msg, 'photos')
                     video = safe_get(msg, 'video')
                     document = safe_get(msg, 'document')
