@@ -1,72 +1,201 @@
+import os
+import asyncio
+import logging
+from pathlib import Path
+from dotenv import load_dotenv
+
+from bale import Bot, Message, InputFile
+from telegram import Bot as TgBot
+from telegram.error import TelegramError
+
+# تنظیمات لاگ
+logging.basicConfig(
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    level=logging.INFO,
+    handlers=[logging.StreamHandler()]
+)
+log = logging.getLogger(__name__)
+
+load_dotenv()
+
+# خواندن متغیرهای محیطی
+BALE_TOKEN = os.getenv("BALE_TOKEN")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+BALE_CHANNEL = os.getenv("BALE_CHANNEL")
+TELEGRAM_CHANNEL = os.getenv("TELEGRAM_CHANNEL")
+
+if not BALE_TOKEN:
+    log.error("❌ توکن بله در فایل .env پیدا نشد!")
+    exit(1)
+if not TELEGRAM_TOKEN:
+    log.error("❌ توکن تلگرام در فایل .env پیدا نشد!")
+    exit(1)
+if not BALE_CHANNEL:
+    log.error("❌ آیدی کانال بله در فایل .env تنظیم نشده است!")
+    exit(1)
+
+# دایرکتوری موقت
+TEMP_DIR = Path("temp_downloads")
+TEMP_DIR.mkdir(exist_ok=True)
+
+# ------------------- توابع کمکی -------------------
+
+async def download_from_bale(bale_bot_instance, file_id: str, file_type: str) -> str | None:
+    """دانلود فایل از بله (ناهمگام)"""
+    try:
+        # در python-bale-bot متد get_file یک شیء File برمی‌گرداند
+        file_info = await bale_bot_instance.get_file(file_id)
+        
+        # ساخت نام فایل موقت
+        file_name = f"{file_type}_{file_id}.file"
+        file_path = TEMP_DIR / file_name
+        
+        # استفاده از save_to_memory برای ذخیره محتوای فایل در دیسک
+        with open(file_path, 'wb') as f:
+            await file_info.save_to_memory(f)
+            
+        log.info(f"📥 فایل از بله دانلود شد: {file_path}")
+        return str(file_path)
+    except Exception as e:
+        log.error(f"❌ خطا در دانلود از بله: {e}")
+        return None
+
+async def send_to_destinations(bale_bot_instance, telegram_bot_instance, text: str, file_path: str = None, file_type: str = None):
+    """ارسال پیام به تمام مقصدها (ناهمگام)"""
+    # ارسال به بله
+    if BALE_CHANNEL:
+        try:
+            if file_path and file_type:
+                # نکته مهم: برای ارسال فایل لوکال، حتماً باید فایل را باز کرده و در InputFile قرار دهیم
+                with open(file_path, 'rb') as f:
+                    input_file = InputFile(f)
+                    if file_type == "photo":
+                        await bale_bot_instance.send_photo(BALE_CHANNEL, input_file, caption=text)
+                    elif file_type == "video":
+                        await bale_bot_instance.send_video(BALE_CHANNEL, input_file, caption=text)
+                    elif file_type == "document":
+                        await bale_bot_instance.send_document(BALE_CHANNEL, input_file, caption=text)
+                    elif file_type == "animation":
+                        await bale_bot_instance.send_animation(BALE_CHANNEL, input_file, caption=text)
+                    elif file_type == "audio":
+                        await bale_bot_instance.send_audio(BALE_CHANNEL, input_file, caption=text)
+            else:
+                await bale_bot_instance.send_message(BALE_CHANNEL, text)
+        except Exception as e:
+            log.error(f"❌ خطا در ارسال به بله: {e}")
+
+    # ارسال به تلگرام
+    if TELEGRAM_CHANNEL:
+        try:
+            if file_path and file_type:
+                with open(file_path, 'rb') as f:
+                    if file_type == "photo":
+                        await telegram_bot_instance.send_photo(TELEGRAM_CHANNEL, f, caption=text)
+                    elif file_type == "video":
+                        await telegram_bot_instance.send_video(TELEGRAM_CHANNEL, f, caption=text)
+                    elif file_type == "document":
+                        await telegram_bot_instance.send_document(TELEGRAM_CHANNEL, f, caption=text)
+                    elif file_type == "animation":
+                        await telegram_bot_instance.send_animation(TELEGRAM_CHANNEL, f, caption=text)
+                    elif file_type == "audio":
+                        await telegram_bot_instance.send_audio(TELEGRAM_CHANNEL, f, caption=text)
+            else:
+                await telegram_bot_instance.send_message(TELEGRAM_CHANNEL, text)
+        except TelegramError as e:
+            log.error(f"❌ خطا در ارسال به تلگرام: {e}")
+            
+    # پاک کردن فایل موقت پس از ارسال
+    if file_path and os.path.exists(file_path):
+        try:
+            os.remove(file_path)
+        except Exception as e:
+            log.warning(f"⚠️ خطا در حذف فایل موقت: {e}")
+
 # ------------------- تابع اصلی (ناهمگام) -------------------
 
 async def main():
     log.info("🚀 ربات همگام‌سازی راه‌اندازی شد.")
     log.info(f"👀 در حال گوش‌دادن به کانال بله: {BALE_CHANNEL}")
 
-    # تست اتصال به بله با دریافت اطلاعات ربات
-    try:
-        me = await bale_bot.get_me()
-        log.info(f"✅ اتصال به بله برقرار شد. ربات: @{me.username}")
-    except Exception as e:
-        log.error(f"❌ اتصال به بله ناموفق: {e}")
-        return
-
-    last_processed_id = None
-
-    while True:
+    # استفاده از async with برای راه‌اندازی خودکار Session هر دو کتابخانه
+    async with Bot(token=BALE_TOKEN) as bale_bot, TgBot(token=TELEGRAM_TOKEN) as telegram_bot:
+        
+        # تست اتصال به بله با دریافت اطلاعات ربات
         try:
-            # دریافت پیام‌های جدید با await
-            updates = await bale_bot.get_updates(offset=last_processed_id, timeout=30)
-
-            for update in updates:
-                if not hasattr(update, 'message'):
-                    continue
-
-                msg = update.message
-                if not msg:
-                    continue
-
-                # نادیده گرفتن پیام‌های خود ربات
-                if getattr(msg.from_user, "is_bot", False):
-                    continue
-
-                # فقط پیام‌های کانال را پردازش کن
-                if getattr(msg.chat, "type", None) != "channel":
-                    continue
-
-                log.info(f"📩 پیام جدید از کانال بله دریافت شد.")
-
-                text = msg.text or msg.caption or ""
-                file_id   = None
-                file_type = None
-                file_path = None
-
-                # تشخیص نوع فایل با بررسی وجود ویژگی‌ها
-                if hasattr(msg, "photo") and getattr(msg.photo, "__len__", lambda: 0)() > 0:
-                    # photo – آخرین (بزرگ‌ترین) عکس در لیست است
-                    file_id   = msg.photo[-1].file_id
-                    file_type = "photo"
-                elif hasattr(msg, "video"):
-                    file_id   = getattr(msg.video, "file_id", None)
-                    file_type = "video" if file_id else None
-                elif hasattr(msg, "document"):
-                    file_id   = getattr(msg.document, "file_id", None)
-                    file_type = "document" if file_id else None
-
-                # دانلود فایل (در صورت وجود)
-                if file_id:
-                    file_path = download_from_bale(file_id)
-                    if not file_path:
-                        log.warning("⚠️ دانلود فایل ناموفق بود، فقط متن ارسال می‌شود.")
-                        file_type = None  # از ارسال فایل صرف‌نظر کن
-
-                # ارسال به مقصدها
-                send_to_destinations(text, file_path, file_type)
-
-                # به‌روزرسانی last_processed_id
-                last_processed_id = update.update_id + 1
-
+            me = await bale_bot.get_me()
+            log.info(f"✅ اتصال به بله برقرار شد. ربات: @{me.username}")
         except Exception as e:
-            log.error(f"❌ خطا در حلقه اصلی: {e}")
-            await asyncio.sleep(5)  # در صورت خطا، ۵ ثانیه صبر کن
+            log.error(f"❌ اتصال به بله ناموفق: {e}")
+            log.error("لطفاً توکن BALE_TOKEN را بررسی کنید.")
+            return
+
+        last_processed_id = None
+
+        while True:
+            try:
+                # دریافت پیام‌های جدید
+                updates = await bale_bot.get_updates(offset=last_processed_id)
+
+                if not updates:
+                    # اگر پیامی نبود، ۱ ثانیه صبر کنید تا به API فشار نیاید (جلوگیری از Rate Limit)
+                    await asyncio.sleep(1)
+                    continue
+
+                for update in updates:
+                    if not hasattr(update, 'message'):
+                        continue
+
+                    msg = update.message
+                    if not msg:
+                        continue
+
+                    # نادیده گرفتن پیام‌های خود ربات (با چک کردن None بودن from_user برای پیام‌های کانال)
+                    if msg.from_user and msg.from_user.is_bot:
+                        continue
+
+                    # فقط پیام‌های کانال را پردازش کن
+                    if msg.chat.type != "channel":
+                        continue
+
+                    log.info(f"📩 پیام جدید از کانال بله دریافت شد.")
+
+                    text = msg.text or msg.caption or ""
+                    file_id = None
+                    file_type = None
+                    file_path = None
+
+                    # تشخیص نوع فایل - در python-bale-bot لیست عکس‌ها photos نام دارد
+                    if msg.photos:
+                        file_id = msg.photos[-1].file_id
+                        file_type = "photo"
+                    elif msg.video:
+                        file_id = msg.video.file_id
+                        file_type = "video"
+                    elif msg.document:
+                        file_id = msg.document.file_id
+                        file_type = "document"
+                    elif msg.animation:
+                        file_id = msg.animation.file_id
+                        file_type = "animation"
+                    elif msg.audio:
+                        file_id = msg.audio.file_id
+                        file_type = "audio"
+
+                    # دانلود فایل (در صورت وجود)
+                    if file_id:
+                        file_path = await download_from_bale(bale_bot, file_id, file_type)
+                        if not file_path:
+                            log.warning("⚠️ دانلود فایل ناموفق بود، فقط متن ارسال می‌شود.")
+
+                    # ارسال به مقصدها
+                    await send_to_destinations(bale_bot, telegram_bot, text, file_path, file_type)
+
+                    # به‌روزرسانی last_processed_id
+                    last_processed_id = update.update_id + 1
+
+            except Exception as e:
+                log.error(f"❌ خطا در حلقه اصلی: {e}")
+                await asyncio.sleep(5) # در صورت خطا، ۵ ثانیه صبر کن
+
+if __name__ == "__main__":
+    asyncio.run(main())
