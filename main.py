@@ -8,7 +8,7 @@ from bale import Bot, Message, InputFile
 from telegram import Bot as TgBot
 from telegram.error import TelegramError
 
-# تنظیمات لاگ
+# تنظیمات لاگ (گزارش‌دهی در ترمینال)
 logging.basicConfig(
     format='%(asctime)s [%(levelname)s] %(message)s',
     level=logging.INFO,
@@ -18,7 +18,7 @@ log = logging.getLogger(__name__)
 
 load_dotenv()
 
-# خواندن متغیرهای محیطی
+# خواندن متغیرهای محیطی از فایل .env
 BALE_TOKEN = os.getenv("BALE_TOKEN")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 BALE_CHANNEL = os.getenv("BALE_CHANNEL")
@@ -34,7 +34,7 @@ if not BALE_CHANNEL:
     log.error("❌ آیدی کانال بله در فایل .env تنظیم نشده است!")
     exit(1)
 
-# دایرکتوری موقت
+# ایجاد دایرکتوری موقت برای فایل‌ها
 TEMP_DIR = Path("temp_downloads")
 TEMP_DIR.mkdir(exist_ok=True)
 
@@ -57,16 +57,12 @@ async def download_from_bale(bale_bot_instance, file_id: str, file_type: str) ->
         file_path = TEMP_DIR / file_name
         
         with open(file_path, 'wb') as f:
-            # حالت ۱: اگر کتابخانه متد save_to_memory داشته باشد
             if hasattr(file_info, 'save_to_memory'):
                 await file_info.save_to_memory(f)
-            # حالت ۲: اگر متد download داشته باشد
             elif hasattr(file_info, 'download'):
                 await file_info.download(str(file_path))
-            # حالت ۳: اگر مستقیماً bytes برگردانده باشد
             elif isinstance(file_info, (bytes, bytearray)):
                 f.write(file_info)
-            # حالت ۴: اگر به صورت دیکشنری حاوی لینک دانلود باشد
             elif isinstance(file_info, dict):
                 file_url = file_info.get('file_url') or file_info.get('url')
                 if file_url:
@@ -88,34 +84,11 @@ async def download_from_bale(bale_bot_instance, file_id: str, file_type: str) ->
         log.error(f"❌ خطا در دانلود از بله: {e}")
         return None
 
-async def send_to_destinations(bale_bot_instance, telegram_bot_instance, text: str, file_path: str = None, file_type: str = None):
-    """ارسال پیام به تمام مقصدها (ناهمگام)"""
+async def send_to_destinations(telegram_bot_instance, text: str, file_path: str = None, file_type: str = None):
+    """ارسال پیام فقط و فقط به تلگرام"""
     
-    # caption فقط در صورتی تنظیم می‌شود که متن غیرخالی باشد
     caption = text if text else None
     
-    # ===================== ارسال به بله =====================
-    if BALE_CHANNEL:
-        try:
-            if file_path and file_type:
-                with open(file_path, 'rb') as f:
-                    input_file = InputFile(f)
-                    if file_type == "photo":
-                        await bale_bot_instance.send_photo(BALE_CHANNEL, input_file, caption=caption)
-                    elif file_type == "video":
-                        await bale_bot_instance.send_video(BALE_CHANNEL, input_file, caption=caption)
-                    elif file_type == "document":
-                        await bale_bot_instance.send_document(BALE_CHANNEL, input_file, caption=caption)
-                    elif file_type == "animation":
-                        await bale_bot_instance.send_animation(BALE_CHANNEL, input_file, caption=caption)
-                    elif file_type == "audio":
-                        await bale_bot_instance.send_audio(BALE_CHANNEL, input_file, caption=caption)
-            elif text:
-                # فقط در صورتی پیام متنی ارسال کن که متن واقعاً وجود داشته باشد
-                await bale_bot_instance.send_message(BALE_CHANNEL, text)
-        except Exception as e:
-            log.error(f"❌ خطا در ارسال به بله: {e}")
-
     # ===================== ارسال به تلگرام =====================
     if TELEGRAM_CHANNEL:
         try:
@@ -132,12 +105,15 @@ async def send_to_destinations(bale_bot_instance, telegram_bot_instance, text: s
                     elif file_type == "audio":
                         await telegram_bot_instance.send_audio(TELEGRAM_CHANNEL, f, caption=caption)
             elif text:
-                # فقط در صورتی پیام متنی ارسال کن که متن واقعاً وجود داشته باشد
                 await telegram_bot_instance.send_message(TELEGRAM_CHANNEL, text)
+                
+            log.info("✅ پیام با موفقیت به تلگرام منتقل شد.")
+            
         except TelegramError as e:
             log.error(f"❌ خطا در ارسال به تلگرام: {e}")
+            log.error("💡 راهنمایی: مطمئن شوید ربات در تلگرام ادمین است و آیدی کانال در .env درست است.")
             
-    # پاک کردن فایل موقت پس از ارسال
+    # پاک کردن فایل موقت از روی سیستم پس از ارسال
     if file_path and os.path.exists(file_path):
         try:
             os.remove(file_path)
@@ -175,15 +151,17 @@ async def main():
                     if not msg:
                         continue
 
+                    # نادیده گرفتن پیام‌هایی که خود ربات‌ها می‌فرستند
                     from_user = safe_get(msg, 'from_user')
                     if from_user and safe_get(from_user, 'is_bot'):
                         continue
 
+                    # فقط پیام‌های کانال پردازش شوند
                     chat = safe_get(msg, 'chat')
                     if safe_get(chat, 'type') != "channel":
                         continue
 
-                    log.info(f"📩 پیام جدید از کانال بله دریافت شد.")
+                    log.info(f"📩 پیام جدید در کانال بله دریافت شد، در حال انتقال...")
 
                     text = safe_get(msg, 'text') or safe_get(msg, 'caption') or ""
                     file_id = None
@@ -217,7 +195,8 @@ async def main():
                         if not file_path:
                             log.warning("⚠️ دانلود فایل ناموفق بود، فقط متن ارسال می‌شود.")
 
-                    await send_to_destinations(bale_bot, telegram_bot, text, file_path, file_type)
+                    # ارسال فقط به تلگرام
+                    await send_to_destinations(telegram_bot, text, file_path, file_type)
 
                     last_processed_id = safe_get(update, 'update_id') + 1
 
