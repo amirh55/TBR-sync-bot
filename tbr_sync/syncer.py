@@ -33,21 +33,28 @@ def _source_key(message: dict) -> tuple[str, str]:
     return _chat_id(message), _message_id(message)
 
 
+def _normalize_username(value: object) -> str:
+    text = str(value or "").strip().lower()
+    return text[1:] if text.startswith("@") else text
+
+
 def _is_source_channel(message: dict, config: Config) -> bool:
     chat = message.get("chat") or {}
-    if chat.get("type") != "channel":
+    expected = (config.bale_channel_id or "").strip()
+    expected_user = _normalize_username(expected)
+    username = _normalize_username(chat.get("username"))
+    chat_id = str(chat.get("id") or "").strip()
+    chat_type = str(chat.get("type") or "").strip().lower()
+
+    # Public channels are best matched by username. This works even if Bale reports
+    # the chat type differently across message/channel_post updates.
+    if expected.startswith("@"):
+        if username and username == expected_user:
+            return True
         return False
 
-    expected = (config.bale_channel_id or "").strip()
-    username = chat.get("username")
-    chat_id = chat.get("id")
-
-    if expected.startswith("@"):
-        # Some Bale responses may omit username for the source channel. In that case, accept channel messages.
-        if username:
-            return str(username).lower() == expected[1:].lower()
-        return True
-    return str(chat_id) == expected
+    # Numeric source id is supported for private channels or responses without username.
+    return bool(expected and chat_id == expected)
 
 
 def _is_bot_message(message: dict) -> bool:
@@ -123,24 +130,30 @@ class Syncer:
             self.store.close()
 
     async def handle_update(self, bale: BaleClient, telegram: TelegramSender, update: dict) -> None:
-        message = update.get("message")
-        if isinstance(message, dict):
-            await self.handle_new_message(bale, telegram, message)
-            return
+        # Bale raw Bot API may deliver channel posts as channel_post instead of message.
+        # Support both forms so public/test channels work reliably.
+        for key in ("message", "channel_post", "post"):
+            message = update.get(key)
+            if isinstance(message, dict):
+                await self.handle_new_message(bale, telegram, message, source_key=key)
+                return
 
-        edited = update.get("edited_message")
-        if isinstance(edited, dict):
-            await self.handle_edited_message(bale, telegram, edited)
-            return
+        for key in ("edited_message", "edited_channel_post", "edited_post"):
+            edited = update.get(key)
+            if isinstance(edited, dict):
+                await self.handle_edited_message(bale, telegram, edited, source_key=key)
+                return
 
         deleted = _deleted_payload(update)
         if deleted:
             await self.handle_deleted_message(telegram, deleted)
             return
 
-        # Callback/payment/service updates are intentionally ignored.
         keys = ",".join(sorted(update.keys()))
-        log.debug("Ignored non-message update. keys=%s", keys)
+        if self.config.log_ignored_updates:
+            log.info("Ignored Bale update. keys=%s raw=%s", keys, json.dumps(update, ensure_ascii=False, default=str)[:1200])
+        else:
+            log.debug("Ignored non-message update. keys=%s", keys)
 
     async def _download_items(self, bale: BaleClient, items: list[MediaItem]) -> list[tuple[str, Path]]:
         downloaded: list[tuple[str, Path]] = []
@@ -211,8 +224,20 @@ class Syncer:
                 f.write(json.dumps(message, ensure_ascii=False, default=str) + "\n")
         return []
 
-    async def handle_new_message(self, bale: BaleClient, telegram: TelegramSender, message: dict) -> None:
-        if not _is_source_channel(message, self.config) or _is_bot_message(message):
+    async def handle_new_message(self, bale: BaleClient, telegram: TelegramSender, message: dict, source_key: str = "message") -> None:
+        if not _is_source_channel(message, self.config):
+            if self.config.log_ignored_updates:
+                chat = message.get("chat") or {}
+                log.info(
+                    "Ignored Bale %s from another chat. expected=%s chat_id=%s username=%s type=%s",
+                    source_key,
+                    self.config.bale_channel_id,
+                    chat.get("id"),
+                    chat.get("username"),
+                    chat.get("type"),
+                )
+            return
+        if _is_bot_message(message):
             return
 
         group_id = _media_group_id(message)
@@ -221,11 +246,14 @@ class Syncer:
             await self._buffer_media_group(bale, telegram, message, media_items, group_id)
             return
 
+        log.info("New Bale %s accepted. Forwarding...", source_key)
         ids = await self._send_message_now(bale, telegram, message)
         if ids:
             chat_id, msg_id = _source_key(message)
             self.store.save(chat_id, msg_id, ids, "message")
             log.info("Forwarded Bale message %s to Telegram ids=%s", msg_id, ids)
+        else:
+            log.warning("Accepted Bale message %s produced no Telegram messages.", _message_id(message))
 
     async def _buffer_media_group(
         self, bale: BaleClient, telegram: TelegramSender, message: dict, media_items: list[MediaItem], group_id: str
@@ -277,8 +305,18 @@ class Syncer:
         finally:
             self._cleanup(downloaded)
 
-    async def handle_edited_message(self, bale: BaleClient, telegram: TelegramSender, message: dict) -> None:
+    async def handle_edited_message(self, bale: BaleClient, telegram: TelegramSender, message: dict, source_key: str = "edited_message") -> None:
         if not _is_source_channel(message, self.config):
+            if self.config.log_ignored_updates:
+                chat = message.get("chat") or {}
+                log.info(
+                    "Ignored Bale %s from another chat. expected=%s chat_id=%s username=%s type=%s",
+                    source_key,
+                    self.config.bale_channel_id,
+                    chat.get("id"),
+                    chat.get("username"),
+                    chat.get("type"),
+                )
             return
 
         chat_id, msg_id = _source_key(message)

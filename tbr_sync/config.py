@@ -41,6 +41,7 @@ class Config:
     state_db: Path
     temp_dir: Path
     fallback_send_unsupported_as_text: bool
+    log_ignored_updates: bool
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -86,4 +87,5 @@ class Config:
             fallback_send_unsupported_as_text=_bool(
                 _env("fallback_send_unsupported_as_text", "FALLBACK_SEND_UNSUPPORTED_AS_TEXT"), False
             ),
+            log_ignored_updates=_bool(_env("log_ignored_updates", "LOG_IGNORED_UPDATES"), False),
         )
