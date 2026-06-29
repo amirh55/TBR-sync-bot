@@ -13,7 +13,7 @@ from telegram.error import TelegramError
 
 from .bale_api import BaleClient
 from .config import Config
-from .media import MediaItem, detect_kind_from_file, extract_media
+from .media import MediaItem, detect_kind_from_file, extension_for, extension_for_detected, extract_media
 from .store import MappingStore
 from .telegram_api import TelegramSender
 
@@ -71,6 +71,21 @@ def _media_group_id(message: dict) -> str | None:
         value = message.get(name)
         if value not in (None, ""):
             return str(value)
+    return None
+
+
+def _reply_source(message: dict) -> tuple[str, str] | None:
+    """Return (bale_chat_id, bale_message_id) of the message this one replies to, if any."""
+    for key in ("reply_to_message", "replyToMessage", "reply_to", "replyTo"):
+        reply = message.get(key)
+        if isinstance(reply, dict):
+            chat_id, msg_id = _source_key(reply)
+            if not chat_id:
+                # Replies usually point at the same chat as the parent message.
+                chat = message.get("chat") or {}
+                chat_id = str(chat.get("id") or chat.get("username") or "")
+            if chat_id and msg_id:
+                return chat_id, msg_id
     return None
 
 
@@ -158,10 +173,19 @@ class Syncer:
     async def _download_items(self, bale: BaleClient, items: list[MediaItem]) -> list[tuple[str, Path]]:
         downloaded: list[tuple[str, Path]] = []
         for item in items:
-            tmp = self.config.temp_dir / f"{item.kind}_{uuid.uuid4().hex}.bin"
+            ext = extension_for(item)
+            tmp = self.config.temp_dir / f"{item.kind}_{uuid.uuid4().hex}{ext}"
             try:
                 path = await bale.download_file(item.file_id, tmp)
                 kind = detect_kind_from_file(path, item.kind)
+                target_ext = extension_for_detected(kind, path)
+                if target_ext and path.suffix.lower() != target_ext.lower():
+                    renamed = path.with_suffix(target_ext)
+                    try:
+                        path.rename(renamed)
+                        path = renamed
+                    except Exception as rename_exc:
+                        log.debug("Could not rename %s to %s: %s", path, renamed, rename_exc)
                 downloaded.append((kind, path))
             except Exception as exc:
                 log.warning("Could not download Bale file kind=%s file_id=%s: %s", item.kind, item.file_id, exc)
@@ -180,42 +204,56 @@ class Syncer:
             except Exception as exc:
                 log.warning("Could not delete temp file %s: %s", path, exc)
 
+    def _reply_target(self, message: dict) -> int | None:
+        """Find the Telegram message_id to reply to, based on the Bale reply_to_message."""
+        reply_src = _reply_source(message)
+        if not reply_src:
+            return None
+        mapping = self.store.get(reply_src[0], reply_src[1])
+        if not mapping:
+            log.info("Reply target not found in mapping for Bale message %s", reply_src[1])
+            return None
+        telegram_ids, _ = mapping
+        return telegram_ids[0] if telegram_ids else None
+
     async def _send_message_now(self, bale: BaleClient, telegram: TelegramSender, message: dict) -> list[int]:
         text = _caption_or_text(message)
         media_items = extract_media(message, self.config)
         contact = message.get("contact")
         location = message.get("location")
+        reply_to = self._reply_target(message)
 
         if self.config.debug_media:
             log.info(
-                "Bale message_id=%s keys=%s media=%s",
+                "Bale message_id=%s keys=%s media=%s reply_to=%s",
                 _message_id(message),
                 sorted(message.keys()),
                 [(m.kind, m.file_id, m.mime_type, m.file_name) for m in media_items],
+                reply_to,
             )
 
         if media_items:
             downloaded = await self._download_items(bale, media_items)
             try:
                 if downloaded:
-                    return await telegram.send_media_group(downloaded, text)
+                    return await telegram.send_media_group(downloaded, text, reply_to_message_id=reply_to)
                 if text:
-                    return await telegram.send_text(text)
+                    return await telegram.send_text(text, reply_to_message_id=reply_to)
                 return []
             finally:
                 self._cleanup(downloaded)
 
         if isinstance(contact, dict):
-            return await telegram.send_contact(contact, text)
+            return await telegram.send_contact(contact, text, reply_to_message_id=reply_to)
 
         if isinstance(location, dict):
-            return await telegram.send_location(location, text)
+            return await telegram.send_location(location, text, reply_to_message_id=reply_to)
 
         if text:
-            return await telegram.send_text(text)
+            return await telegram.send_text(text, reply_to_message_id=reply_to)
 
         if self.config.fallback_send_unsupported_as_text:
-            return await telegram.send_text("Unsupported Bale message was received and skipped.")
+            return await telegram.send_text("Unsupported Bale message was received and skipped.", reply_to_message_id=reply_to)
 
         keys = sorted(message.keys())
         log.warning("Unsupported/empty Bale post was skipped. message_id=%s keys=%s", _message_id(message), keys)
@@ -262,10 +300,14 @@ class Syncer:
         key = f"{chat_id}:{group_id}"
         group = self.pending_groups.setdefault(
             key,
-            {"entries": [], "caption": "", "task": None, "bale": bale, "telegram": telegram},
+            {"entries": [], "caption": "", "task": None, "bale": bale, "telegram": telegram, "reply_to": None},
         )
         if _caption_or_text(message) and not group["caption"]:
             group["caption"] = _caption_or_text(message)
+        if group.get("reply_to") is None:
+            reply_to = self._reply_target(message)
+            if reply_to is not None:
+                group["reply_to"] = reply_to
         group["entries"].append({"source": (chat_id, msg_id), "items": media_items})
 
         task = group.get("task")
@@ -288,7 +330,7 @@ class Syncer:
 
         downloaded = await self._download_items(group["bale"], all_media)
         try:
-            ids = await group["telegram"].send_media_group(downloaded, group["caption"])
+            ids = await group["telegram"].send_media_group(downloaded, group["caption"], reply_to_message_id=group.get("reply_to"))
             if ids:
                 by_source: dict[tuple[str, str], list[int]] = defaultdict(list)
                 if len(ids) == len(source_for_each_item):

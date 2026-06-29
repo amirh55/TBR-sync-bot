@@ -41,78 +41,100 @@ class TelegramSender:
             return [result.message_id]
         return []
 
-    async def _send_text_chunks(self, html_text: str) -> list[int]:
+    async def _send_text_chunks(self, html_text: str, reply_to_message_id: int | None = None) -> list[int]:
         ids: list[int] = []
         if not html_text:
             return ids
+        first = True
         for start in range(0, len(html_text), MAX_TEXT):
             chunk = html_text[start : start + MAX_TEXT]
-            msg = await self.bot.send_message(self.config.telegram_channel_id, chunk, parse_mode="HTML")
+            msg = await self.bot.send_message(
+                self.config.telegram_channel_id,
+                chunk,
+                parse_mode="HTML",
+                reply_to_message_id=reply_to_message_id if first else None,
+                allow_sending_without_reply=True,
+            )
             ids.append(msg.message_id)
+            first = False
         return ids
 
-    async def send_text(self, text: str | None) -> list[int]:
+    async def send_text(self, text: str | None, reply_to_message_id: int | None = None) -> list[int]:
         html_text = self.format_text(text)
-        return await self._send_text_chunks(html_text)
+        return await self._send_text_chunks(html_text, reply_to_message_id=reply_to_message_id, allow_sending_without_reply=True)
 
-    async def send_contact(self, contact: dict, caption: str | None = None) -> list[int]:
+    async def send_contact(self, contact: dict, caption: str | None = None, reply_to_message_id: int | None = None) -> list[int]:
         ids: list[int] = []
         phone = contact.get("phone_number") or contact.get("phoneNumber")
         first_name = contact.get("first_name") or contact.get("firstName") or "Contact"
         last_name = contact.get("last_name") or contact.get("lastName")
         if not phone:
-            return await self.send_text(caption)
-        msg = await self.bot.send_contact(self.config.telegram_channel_id, phone_number=str(phone), first_name=str(first_name), last_name=last_name)
+            return await self.send_text(caption, reply_to_message_id=reply_to_message_id, allow_sending_without_reply=True)
+        msg = await self.bot.send_contact(
+            self.config.telegram_channel_id,
+            phone_number=str(phone),
+            first_name=str(first_name),
+            last_name=last_name,
+            reply_to_message_id=reply_to_message_id,
+            allow_sending_without_reply=True,
+        )
         ids.append(msg.message_id)
         ids.extend(await self.send_text(caption))
         return ids
 
-    async def send_location(self, location: dict, caption: str | None = None) -> list[int]:
+    async def send_location(self, location: dict, caption: str | None = None, reply_to_message_id: int | None = None) -> list[int]:
         ids: list[int] = []
         lat = location.get("latitude")
         lon = location.get("longitude")
         if lat is None or lon is None:
-            return await self.send_text(caption)
-        msg = await self.bot.send_location(self.config.telegram_channel_id, latitude=float(lat), longitude=float(lon))
+            return await self.send_text(caption, reply_to_message_id=reply_to_message_id, allow_sending_without_reply=True)
+        msg = await self.bot.send_location(
+            self.config.telegram_channel_id,
+            latitude=float(lat),
+            longitude=float(lon),
+            reply_to_message_id=reply_to_message_id,
+            allow_sending_without_reply=True,
+        )
         ids.append(msg.message_id)
         ids.extend(await self.send_text(caption))
         return ids
 
-    async def send_file(self, kind: str, path: Path, text: str | None = None) -> list[int]:
+    async def send_file(self, kind: str, path: Path, text: str | None = None, reply_to_message_id: int | None = None) -> list[int]:
         html_text = self.format_text(text)
         caption = html_text if html_text and len(html_text) <= MAX_CAPTION else None
         extra_text = html_text if html_text and len(html_text) > MAX_CAPTION else ""
+        filename = path.name
 
         sent: Message | None = None
         with path.open("rb") as f:
             if kind == "photo":
-                sent = await self.bot.send_photo(self.config.telegram_channel_id, f, caption=caption, parse_mode="HTML" if caption else None)
+                sent = await self.bot.send_photo(self.config.telegram_channel_id, f, caption=caption, parse_mode="HTML" if caption else None, filename=filename, reply_to_message_id=reply_to_message_id, allow_sending_without_reply=True)
             elif kind == "video":
-                sent = await self.bot.send_video(self.config.telegram_channel_id, f, caption=caption, parse_mode="HTML" if caption else None)
+                sent = await self.bot.send_video(self.config.telegram_channel_id, f, caption=caption, parse_mode="HTML" if caption else None, filename=filename, supports_streaming=True, reply_to_message_id=reply_to_message_id, allow_sending_without_reply=True)
             elif kind == "animation":
-                sent = await self.bot.send_animation(self.config.telegram_channel_id, f, caption=caption, parse_mode="HTML" if caption else None)
+                sent = await self.bot.send_animation(self.config.telegram_channel_id, f, caption=caption, parse_mode="HTML" if caption else None, filename=filename, reply_to_message_id=reply_to_message_id, allow_sending_without_reply=True)
             elif kind == "audio":
-                sent = await self.bot.send_audio(self.config.telegram_channel_id, f, caption=caption, parse_mode="HTML" if caption else None)
+                sent = await self.bot.send_audio(self.config.telegram_channel_id, f, caption=caption, parse_mode="HTML" if caption else None, filename=filename, reply_to_message_id=reply_to_message_id, allow_sending_without_reply=True)
             elif kind == "voice":
-                sent = await self.bot.send_voice(self.config.telegram_channel_id, f, caption=caption, parse_mode="HTML" if caption else None)
+                sent = await self.bot.send_voice(self.config.telegram_channel_id, f, caption=caption, parse_mode="HTML" if caption else None, filename=filename, reply_to_message_id=reply_to_message_id, allow_sending_without_reply=True)
             elif kind == "sticker":
                 try:
-                    sent = await self.bot.send_sticker(self.config.telegram_channel_id, f)
+                    sent = await self.bot.send_sticker(self.config.telegram_channel_id, f, reply_to_message_id=reply_to_message_id, allow_sending_without_reply=True)
                 except TelegramError:
                     f.seek(0)
-                    sent = await self.bot.send_document(self.config.telegram_channel_id, f, caption=caption, parse_mode="HTML" if caption else None)
+                    sent = await self.bot.send_document(self.config.telegram_channel_id, f, caption=caption, parse_mode="HTML" if caption else None, filename=filename, reply_to_message_id=reply_to_message_id, allow_sending_without_reply=True)
             else:
-                sent = await self.bot.send_document(self.config.telegram_channel_id, f, caption=caption, parse_mode="HTML" if caption else None)
+                sent = await self.bot.send_document(self.config.telegram_channel_id, f, caption=caption, parse_mode="HTML" if caption else None, filename=filename, reply_to_message_id=reply_to_message_id, allow_sending_without_reply=True)
 
         ids = self._ids(sent)
         ids.extend(await self._send_text_chunks(extra_text))
         return ids
 
-    async def send_media_group(self, items: list[tuple[str, Path]], text: str | None = None) -> list[int]:
+    async def send_media_group(self, items: list[tuple[str, Path]], text: str | None = None, reply_to_message_id: int | None = None) -> list[int]:
         if not items:
-            return await self.send_text(text)
+            return await self.send_text(text, reply_to_message_id=reply_to_message_id, allow_sending_without_reply=True)
         if len(items) == 1:
-            return await self.send_file(items[0][0], items[0][1], text)
+            return await self.send_file(items[0][0], items[0][1], text, reply_to_message_id=reply_to_message_id, allow_sending_without_reply=True)
 
         # Telegram albums can mix photo/video. Other kinds are sent separately.
         album_items = [(kind, path) for kind, path in items if kind in {"photo", "video"}]
@@ -131,10 +153,15 @@ class TelegramSender:
                     opened.append(f)
                     item_caption = caption if index == 0 else None
                     if kind == "photo":
-                        media.append(InputMediaPhoto(media=f, caption=item_caption, parse_mode="HTML" if item_caption else None))
+                        media.append(InputMediaPhoto(media=f, caption=item_caption, parse_mode="HTML" if item_caption else None, filename=path.name))
                     else:
-                        media.append(InputMediaVideo(media=f, caption=item_caption, parse_mode="HTML" if item_caption else None))
-                result = await self.bot.send_media_group(self.config.telegram_channel_id, media=media)
+                        media.append(InputMediaVideo(media=f, caption=item_caption, parse_mode="HTML" if item_caption else None, filename=path.name, supports_streaming=True))
+                result = await self.bot.send_media_group(
+                    self.config.telegram_channel_id,
+                    media=media,
+                    reply_to_message_id=reply_to_message_id,
+                    allow_sending_without_reply=True,
+                )
                 ids.extend(self._ids(result))
                 ids.extend(await self._send_text_chunks(extra_text))
             finally:
@@ -145,7 +172,8 @@ class TelegramSender:
                         pass
 
         for index, (kind, path) in enumerate(other_items):
-            ids.extend(await self.send_file(kind, path, text if not ids and index == 0 else ""))
+            reply_for_other = reply_to_message_id if not ids else None
+            ids.extend(await self.send_file(kind, path, text if not ids and index == 0 else "", reply_to_message_id=reply_for_other))
         return ids
 
     async def edit_existing(self, telegram_message_ids: list[int], new_text: str | None) -> bool:

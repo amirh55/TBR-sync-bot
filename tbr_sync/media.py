@@ -145,3 +145,63 @@ def detect_kind_from_file(path: Path, default: str) -> str:
     if len(head) > 12 and b"ftyp" in head[4:12]:
         return "video"
     return default
+
+
+_MIME_TO_EXT = {
+    "image/jpeg": ".jpg",
+    "image/jpg": ".jpg",
+    "image/png": ".png",
+    "image/webp": ".webp",
+    "image/gif": ".gif",
+    "image/bmp": ".bmp",
+    "video/mp4": ".mp4",
+    "video/quicktime": ".mov",
+    "video/x-matroska": ".mkv",
+    "video/webm": ".webm",
+    "video/x-msvideo": ".avi",
+    "video/3gpp": ".3gp",
+    "audio/mpeg": ".mp3",
+    "audio/mp3": ".mp3",
+    "audio/mp4": ".m4a",
+    "audio/x-m4a": ".m4a",
+    "audio/aac": ".aac",
+    "audio/ogg": ".ogg",
+    "audio/opus": ".opus",
+    "audio/wav": ".wav",
+    "audio/x-wav": ".wav",
+}
+
+_KIND_DEFAULT_EXT = {
+    "photo": ".jpg",
+    "video": ".mp4",
+    "animation": ".gif",
+    "audio": ".mp3",
+    "voice": ".ogg",
+    "sticker": ".webp",
+    "document": ".bin",
+}
+
+
+def extension_for(item: "MediaItem") -> str:
+    """Pick a sensible file extension so Telegram clients recognize the media type."""
+    name = (item.file_name or "").strip().lower()
+    if "." in name:
+        ext = "." + name.rsplit(".", 1)[-1]
+        if 2 <= len(ext) <= 6 and ext[1:].isalnum():
+            return ext
+    mime = (item.mime_type or "").strip().lower()
+    if mime in _MIME_TO_EXT:
+        return _MIME_TO_EXT[mime]
+    return _KIND_DEFAULT_EXT.get(item.kind, ".bin")
+
+
+def extension_for_detected(kind: str, current_path: Path) -> str:
+    """Return an extension consistent with the detected kind, falling back to current."""
+    suffix = current_path.suffix.lower()
+    if kind == "photo" and suffix not in {".jpg", ".jpeg", ".png", ".webp", ".bmp"}:
+        return ".jpg"
+    if kind == "video" and suffix not in {".mp4", ".mov", ".m4v", ".webm", ".mkv", ".3gp", ".avi"}:
+        return ".mp4"
+    if kind == "animation" and suffix != ".gif":
+        return ".gif"
+    return suffix or _KIND_DEFAULT_EXT.get(kind, ".bin")
