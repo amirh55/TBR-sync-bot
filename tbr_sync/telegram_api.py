@@ -61,7 +61,7 @@ class TelegramSender:
 
     async def send_text(self, text: str | None, reply_to_message_id: int | None = None) -> list[int]:
         html_text = self.format_text(text)
-        return await self._send_text_chunks(html_text, reply_to_message_id=reply_to_message_id, allow_sending_without_reply=True)
+        return await self._send_text_chunks(html_text, reply_to_message_id=reply_to_message_id)
 
     async def send_contact(self, contact: dict, caption: str | None = None, reply_to_message_id: int | None = None) -> list[int]:
         ids: list[int] = []
@@ -69,7 +69,7 @@ class TelegramSender:
         first_name = contact.get("first_name") or contact.get("firstName") or "Contact"
         last_name = contact.get("last_name") or contact.get("lastName")
         if not phone:
-            return await self.send_text(caption, reply_to_message_id=reply_to_message_id, allow_sending_without_reply=True)
+            return await self.send_text(caption, reply_to_message_id=reply_to_message_id)
         msg = await self.bot.send_contact(
             self.config.telegram_channel_id,
             phone_number=str(phone),
@@ -87,7 +87,7 @@ class TelegramSender:
         lat = location.get("latitude")
         lon = location.get("longitude")
         if lat is None or lon is None:
-            return await self.send_text(caption, reply_to_message_id=reply_to_message_id, allow_sending_without_reply=True)
+            return await self.send_text(caption, reply_to_message_id=reply_to_message_id)
         msg = await self.bot.send_location(
             self.config.telegram_channel_id,
             latitude=float(lat),
@@ -132,9 +132,9 @@ class TelegramSender:
 
     async def send_media_group(self, items: list[tuple[str, Path]], text: str | None = None, reply_to_message_id: int | None = None) -> list[int]:
         if not items:
-            return await self.send_text(text, reply_to_message_id=reply_to_message_id, allow_sending_without_reply=True)
+            return await self.send_text(text, reply_to_message_id=reply_to_message_id)
         if len(items) == 1:
-            return await self.send_file(items[0][0], items[0][1], text, reply_to_message_id=reply_to_message_id, allow_sending_without_reply=True)
+            return await self.send_file(items[0][0], items[0][1], text, reply_to_message_id=reply_to_message_id)
 
         # Telegram albums can mix photo/video. Other kinds are sent separately.
         album_items = [(kind, path) for kind, path in items if kind in {"photo", "video"}]
