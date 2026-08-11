@@ -1,5 +1,25 @@
+# secrets
 .env
+.env.*
+!.env.example
+
+# runtime state
+*.db
+*.db-wal
+*.db-shm
+.tbr_sync.db
+temp_downloads/
+unsupported_updates.log
+logs/
+
+# python
 venv/
+.venv/
 __pycache__/
 *.pyc
+*.pyo
+*.egg-info/
+build/
+dist/
+.pytest_cache/
 *.session

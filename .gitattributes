@@ -1,0 +1,5 @@
+# Shell scripts must keep LF endings or bash on the server fails with
+# "bad interpreter: /usr/bin/env bash^M" after a checkout from Windows.
+*.sh text eol=lf
+tbrctl text eol=lf
+*.py text eol=lf

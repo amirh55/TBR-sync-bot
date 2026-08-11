@@ -2,10 +2,13 @@
 """Entry point for TBR sync bot."""
 
 import asyncio
+import logging
 
 from tbr_sync.config import Config
 from tbr_sync.logger import setup_logging
 from tbr_sync.syncer import Syncer
+
+log = logging.getLogger(__name__)
 
 
 async def main() -> None:
@@ -16,4 +19,8 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        # Signal handlers already stop the loop cleanly; this covers Windows.
+        log.info("Stopped by keyboard interrupt.")

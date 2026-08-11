@@ -11,8 +11,14 @@ from .config import Config
 
 log = logging.getLogger(__name__)
 
+DOWNLOAD_CHUNK = 64 * 1024
+
 
 class BaleApiError(RuntimeError):
+    pass
+
+
+class FileTooLargeError(BaleApiError):
     pass
 
 
@@ -37,6 +43,10 @@ class BaleClient:
 
     async def get_me(self) -> dict:
         result = await self.request("getMe")
+        return result if isinstance(result, dict) else {}
+
+    async def get_chat(self, chat_id: str) -> dict:
+        result = await self.request("getChat", {"chat_id": chat_id})
         return result if isinstance(result, dict) else {}
 
     async def delete_webhook(self) -> None:
@@ -78,13 +88,38 @@ class BaleClient:
         return result if isinstance(result, dict) else {}
 
     async def download_file(self, file_id: str, destination: Path) -> Path:
+        """Stream a Bale file to disk, refusing anything above max_file_mb.
+
+        Streaming keeps a large video from being held entirely in memory, and the
+        size guard stops an oversized file from reaching Telegram's 50MB upload cap
+        and failing the whole update.
+        """
         info = await self.get_file(file_id)
         file_path = info.get("file_path")
         if not file_path:
             raise BaleApiError(f"getFile returned no file_path for file_id={file_id}")
 
+        limit = self.config.max_file_bytes
+        declared = info.get("file_size")
+        if limit and isinstance(declared, int) and declared > limit:
+            raise FileTooLargeError(
+                f"Bale file {file_id} is {declared / 1048576:.1f}MB which is above the {self.config.max_file_mb}MB limit"
+            )
+
         url = f"{self.file_base}/{quote(str(file_path))}"
-        response = await self.client.get(url)
-        response.raise_for_status()
-        destination.write_bytes(response.content)
+        written = 0
+        try:
+            async with self.client.stream("GET", url) as response:
+                response.raise_for_status()
+                with destination.open("wb") as handle:
+                    async for chunk in response.aiter_bytes(DOWNLOAD_CHUNK):
+                        written += len(chunk)
+                        if limit and written > limit:
+                            raise FileTooLargeError(
+                                f"Bale file {file_id} exceeded the {self.config.max_file_mb}MB limit while downloading"
+                            )
+                        handle.write(chunk)
+        except Exception:
+            destination.unlink(missing_ok=True)
+            raise
         return destination

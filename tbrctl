@@ -1,0 +1,121 @@
+#!/usr/bin/env bash
+# TBR Sync Bot control helper. Installed to /usr/local/bin/tbrctl by install.sh.
+set -euo pipefail
+
+SERVICE_NAME="tbr-sync-bot"
+PROJECT_DIR="__PROJECT_DIR__"   # rewritten by install.sh
+
+BOLD=$'\033[1m'; DIM=$'\033[2m'; GREEN=$'\033[32m'; RED=$'\033[31m'; RESET=$'\033[0m'
+
+if [[ $EUID -eq 0 ]]; then SUDO=""; else SUDO="sudo"; fi
+
+die() { printf '%s\n' "${RED}✘ $*${RESET}" >&2; exit 1; }
+ok()  { printf '%s\n' "${GREEN}✔ $*${RESET}"; }
+
+# Fall back to the script's own directory if the placeholder was never rewritten.
+if [[ "$PROJECT_DIR" == "__PROJECT_DIR__" || ! -d "$PROJECT_DIR" ]]; then
+  PROJECT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+fi
+
+usage() {
+  cat <<HELP
+${BOLD}tbrctl${RESET} — control the TBR Sync Bot service
+
+  tbrctl start        start the bot
+  tbrctl stop         stop the bot
+  tbrctl restart      restart the bot
+  tbrctl status       show service status and the last few log lines
+  tbrctl logs [-n N]  follow the live log (default: follow; -n prints last N lines and exits)
+  tbrctl config       edit tokens / channels interactively, then restart
+  tbrctl update       git pull, reinstall dependencies, restart
+  tbrctl enable       start automatically on boot
+  tbrctl disable      do not start automatically on boot
+  tbrctl uninstall    remove the systemd service (your files and .env are kept)
+
+  project: $PROJECT_DIR
+HELP
+}
+
+cmd="${1:-status}"
+shift || true
+
+case "$cmd" in
+  start)
+    $SUDO systemctl start "$SERVICE_NAME"
+    sleep 1
+    $SUDO systemctl is-active --quiet "$SERVICE_NAME" && ok "started" || die "failed to start — run 'tbrctl logs -n 30'"
+    ;;
+
+  stop)
+    $SUDO systemctl stop "$SERVICE_NAME"
+    ok "stopped"
+    ;;
+
+  restart)
+    $SUDO systemctl restart "$SERVICE_NAME"
+    sleep 2
+    $SUDO systemctl is-active --quiet "$SERVICE_NAME" && ok "restarted" || die "failed to start — run 'tbrctl logs -n 30'"
+    ;;
+
+  status)
+    $SUDO systemctl status "$SERVICE_NAME" --no-pager --lines=10 || true
+    ;;
+
+  logs)
+    if [[ "${1:-}" == "-n" ]]; then
+      $SUDO journalctl -u "$SERVICE_NAME" -n "${2:-50}" --no-pager
+    else
+      printf '%s\n' "${DIM}Following live log — press Ctrl+C to exit.${RESET}"
+      $SUDO journalctl -u "$SERVICE_NAME" -f --no-pager
+    fi
+    ;;
+
+  config)
+    [[ -x "$PROJECT_DIR/venv/bin/python" ]] || die "virtualenv not found at $PROJECT_DIR/venv — run install.sh first"
+    "$PROJECT_DIR/venv/bin/python" "$PROJECT_DIR/setup_env.py"
+    $SUDO systemctl restart "$SERVICE_NAME"
+    ok "configuration saved and bot restarted"
+    ;;
+
+  update)
+    cd "$PROJECT_DIR"
+    if [[ -d .git ]]; then
+      git pull --ff-only
+    else
+      printf '%s\n' "${DIM}Not a git checkout; skipping git pull.${RESET}"
+    fi
+    "$PROJECT_DIR/venv/bin/python" -m pip install --quiet --upgrade -r requirements.txt
+    $SUDO systemctl restart "$SERVICE_NAME"
+    ok "updated and restarted"
+    ;;
+
+  enable)
+    $SUDO systemctl enable "$SERVICE_NAME"
+    ok "autostart on boot enabled"
+    ;;
+
+  disable)
+    $SUDO systemctl disable "$SERVICE_NAME"
+    ok "autostart on boot disabled"
+    ;;
+
+  uninstall)
+    read -r -p "Remove the $SERVICE_NAME service? Your files and .env are kept. [y/N] " answer
+    [[ "$answer" =~ ^[Yy]$ ]] || { echo "Cancelled."; exit 0; }
+    $SUDO systemctl disable --now "$SERVICE_NAME" 2>/dev/null || true
+    $SUDO rm -f "/etc/systemd/system/${SERVICE_NAME}.service"
+    $SUDO systemctl daemon-reload
+    ok "service removed (project files untouched)"
+    ;;
+
+  -h|--help|help)
+    usage
+    ;;
+
+  *)
+    printf '%s\n' "${RED}Unknown command: $cmd${RESET}"
+    echo
+    usage
+    exit 1
+    ;;
+esac

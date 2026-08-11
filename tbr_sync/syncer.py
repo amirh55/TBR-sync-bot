@@ -4,14 +4,14 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import signal
 import uuid
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
-from telegram.error import TelegramError
-
-from .bale_api import BaleClient
+from . import __version__
+from .bale_api import BaleClient, FileTooLargeError
 from .config import Config
 from .media import MediaItem, detect_kind_from_file, extension_for, extension_for_detected, extract_media
 from .store import MappingStore
@@ -36,25 +36,6 @@ def _source_key(message: dict) -> tuple[str, str]:
 def _normalize_username(value: object) -> str:
     text = str(value or "").strip().lower()
     return text[1:] if text.startswith("@") else text
-
-
-def _is_source_channel(message: dict, config: Config) -> bool:
-    chat = message.get("chat") or {}
-    expected = (config.bale_channel_id or "").strip()
-    expected_user = _normalize_username(expected)
-    username = _normalize_username(chat.get("username"))
-    chat_id = str(chat.get("id") or "").strip()
-    chat_type = str(chat.get("type") or "").strip().lower()
-
-    # Public channels are best matched by username. This works even if Bale reports
-    # the chat type differently across message/channel_post updates.
-    if expected.startswith("@"):
-        if username and username == expected_user:
-            return True
-        return False
-
-    # Numeric source id is supported for private channels or responses without username.
-    return bool(expected and chat_id == expected)
 
 
 def _is_bot_message(message: dict) -> bool:
@@ -110,39 +91,137 @@ class Syncer:
         self.config = config
         self.store = MappingStore(config.state_db)
         self.pending_groups: dict[str, dict[str, Any]] = {}
+        self.source_ids: set[str] = set()
+        self.source_usernames: set[str] = set()
+        self._group_tasks: set[asyncio.Task] = set()
+        self._stopping = asyncio.Event()
+
+    # --------------------------------------------------------------- lifecycle
+
+    def request_stop(self, reason: str = "") -> None:
+        if not self._stopping.is_set():
+            log.info("Shutdown requested%s. Finishing pending work...", f" ({reason})" if reason else "")
+            self._stopping.set()
+
+    def _install_signal_handlers(self) -> None:
+        loop = asyncio.get_running_loop()
+        for name in ("SIGTERM", "SIGINT"):
+            sig = getattr(signal, name, None)
+            if sig is None:
+                continue
+            try:
+                loop.add_signal_handler(sig, self.request_stop, name)
+            except (NotImplementedError, RuntimeError):
+                # Windows does not support add_signal_handler for these.
+                pass
+
+    async def _resolve_source_chat(self, bale: BaleClient) -> None:
+        """Learn every identifier the source channel can appear under.
+
+        Bale does not always include `username` on channel_post updates, so a
+        config that uses @name must also know the numeric id or posts get dropped.
+        """
+        expected = (self.config.bale_channel_id or "").strip()
+        if not expected:
+            return
+        if expected.startswith("@"):
+            self.source_usernames.add(_normalize_username(expected))
+        else:
+            self.source_ids.add(expected)
+
+        try:
+            chat = await bale.get_chat(expected)
+        except Exception as exc:
+            log.warning("Could not resolve Bale source chat %s via getChat: %s", expected, exc)
+            return
+
+        chat_id = str(chat.get("id") or "").strip()
+        username = _normalize_username(chat.get("username"))
+        if chat_id:
+            self.source_ids.add(chat_id)
+        if username:
+            self.source_usernames.add(username)
+        log.info("Bale source chat resolved. ids=%s usernames=%s", sorted(self.source_ids), sorted(self.source_usernames))
+
+    async def _initial_offset(self, bale: BaleClient) -> int | None:
+        stored = self.store.get_offset()
+        if stored is not None:
+            log.info("Resuming from stored Bale update offset %s.", stored)
+            return stored
+        offset = await bale.skip_pending_updates()
+        if offset is not None:
+            self.store.set_offset(offset)
+        return offset
 
     async def run(self) -> None:
-        log.info("TBR sync bot v14 started.")
+        log.info("TBR sync bot v%s started.", __version__)
         log.info("Bale source channel: %s", self.config.bale_channel_id)
         log.info("Telegram destination channel: %s", self.config.telegram_channel_id)
         log.info("State DB: %s", self.config.state_db)
 
+        self._install_signal_handlers()
         bale = BaleClient(self.config)
         try:
             await bale.delete_webhook()
             me = await bale.get_me()
             log.info("Connected to Bale. Bot username: @%s", me.get("username", "unknown"))
+            await self._resolve_source_chat(bale)
 
             async with TelegramSender(self.config) as telegram:
-                offset = await bale.skip_pending_updates()
-                while True:
+                offset = await self._initial_offset(bale)
+
+                while not self._stopping.is_set():
                     try:
                         updates = await bale.get_updates(offset)
-                        if not updates:
-                            await asyncio.sleep(0.2)
-                            continue
+                    except Exception as exc:
+                        log.warning("Could not fetch Bale updates: %s", exc)
+                        await asyncio.sleep(5)
+                        continue
 
-                        for update in updates:
-                            update_id = update.get("update_id")
+                    if not updates:
+                        await asyncio.sleep(0.2)
+                        continue
+
+                    for update in updates:
+                        update_id = update.get("update_id")
+                        try:
                             await self.handle_update(bale, telegram, update)
+                        except Exception:
+                            # A single bad update must never block the queue forever.
+                            log.exception("Failed to process Bale update %s; skipping it.", update_id)
+                        finally:
                             if isinstance(update_id, int):
                                 offset = update_id + 1
-                    except Exception as exc:
-                        log.exception("Main loop error: %s", exc)
-                        await asyncio.sleep(5)
+                                self.store.set_offset(offset)
+
+                await self._flush_all_pending()
+                log.info("Shutdown complete.")
         finally:
             await bale.close()
             self.store.close()
+
+    # ------------------------------------------------------------- dispatching
+
+    def _is_source_channel(self, message: dict) -> bool:
+        chat = message.get("chat") or {}
+        chat_id = str(chat.get("id") or "").strip()
+        username = _normalize_username(chat.get("username"))
+        if chat_id and chat_id in self.source_ids:
+            return True
+        return bool(username and username in self.source_usernames)
+
+    def _log_wrong_chat(self, source_key: str, message: dict) -> None:
+        if not self.config.log_ignored_updates:
+            return
+        chat = message.get("chat") or {}
+        log.info(
+            "Ignored Bale %s from another chat. expected=%s chat_id=%s username=%s type=%s",
+            source_key,
+            self.config.bale_channel_id,
+            chat.get("id"),
+            chat.get("username"),
+            chat.get("type"),
+        )
 
     async def handle_update(self, bale: BaleClient, telegram: TelegramSender, update: dict) -> None:
         # Bale raw Bot API may deliver channel posts as channel_post instead of message.
@@ -170,8 +249,12 @@ class Syncer:
         else:
             log.debug("Ignored non-message update. keys=%s", keys)
 
-    async def _download_items(self, bale: BaleClient, items: list[MediaItem]) -> list[tuple[str, Path]]:
+    # ------------------------------------------------------------------ media
+
+    async def _download_items(self, bale: BaleClient, items: list[MediaItem]) -> tuple[list[tuple[str, Path]], int]:
+        """Download media to temp files. Returns (downloaded, skipped_count)."""
         downloaded: list[tuple[str, Path]] = []
+        skipped = 0
         for item in items:
             ext = extension_for(item)
             tmp = self.config.temp_dir / f"{item.kind}_{uuid.uuid4().hex}{ext}"
@@ -187,14 +270,28 @@ class Syncer:
                     except Exception as rename_exc:
                         log.debug("Could not rename %s to %s: %s", path, renamed, rename_exc)
                 downloaded.append((kind, path))
+            except FileTooLargeError as exc:
+                skipped += 1
+                log.warning("Skipped oversized Bale file kind=%s: %s", item.kind, exc)
             except Exception as exc:
+                skipped += 1
                 log.warning("Could not download Bale file kind=%s file_id=%s: %s", item.kind, item.file_id, exc)
+            finally:
                 try:
-                    if tmp.exists():
+                    if tmp.exists() and not any(tmp == p for _, p in downloaded):
                         tmp.unlink()
                 except Exception:
                     pass
-        return downloaded
+        return downloaded, skipped
+
+    def _with_skip_notice(self, text: str, skipped: int) -> str:
+        if skipped <= 0 or not self.config.skipped_file_notice:
+            return text
+        try:
+            notice = self.config.skipped_file_notice.format(count=skipped)
+        except (KeyError, IndexError):
+            notice = self.config.skipped_file_notice
+        return f"{text}\n\n{notice}" if text else notice
 
     def _cleanup(self, paths: list[tuple[str, Path]]) -> None:
         for _, path in paths:
@@ -233,12 +330,13 @@ class Syncer:
             )
 
         if media_items:
-            downloaded = await self._download_items(bale, media_items)
+            downloaded, skipped = await self._download_items(bale, media_items)
+            caption = self._with_skip_notice(text, skipped)
             try:
                 if downloaded:
-                    return await telegram.send_media_group(downloaded, text, reply_to_message_id=reply_to)
-                if text:
-                    return await telegram.send_text(text, reply_to_message_id=reply_to)
+                    return await telegram.send_media_group(downloaded, caption, reply_to_message_id=reply_to)
+                if caption:
+                    return await telegram.send_text(caption, reply_to_message_id=reply_to)
                 return []
             finally:
                 self._cleanup(downloaded)
@@ -258,24 +356,31 @@ class Syncer:
         keys = sorted(message.keys())
         log.warning("Unsupported/empty Bale post was skipped. message_id=%s keys=%s", _message_id(message), keys)
         if self.config.log_unsupported_json:
-            with open("unsupported_updates.log", "a", encoding="utf-8") as f:
-                f.write(json.dumps(message, ensure_ascii=False, default=str) + "\n")
+            try:
+                self.config.unsupported_log.parent.mkdir(parents=True, exist_ok=True)
+                with self.config.unsupported_log.open("a", encoding="utf-8") as f:
+                    f.write(json.dumps(message, ensure_ascii=False, default=str) + "\n")
+            except Exception as exc:
+                log.warning("Could not write unsupported update log: %s", exc)
         return []
 
+    # ------------------------------------------------------------- new message
+
+    def _already_forwarded(self, message: dict) -> bool:
+        chat_id, msg_id = _source_key(message)
+        if not msg_id:
+            return False
+        return self.store.get(chat_id, msg_id) is not None
+
     async def handle_new_message(self, bale: BaleClient, telegram: TelegramSender, message: dict, source_key: str = "message") -> None:
-        if not _is_source_channel(message, self.config):
-            if self.config.log_ignored_updates:
-                chat = message.get("chat") or {}
-                log.info(
-                    "Ignored Bale %s from another chat. expected=%s chat_id=%s username=%s type=%s",
-                    source_key,
-                    self.config.bale_channel_id,
-                    chat.get("id"),
-                    chat.get("username"),
-                    chat.get("type"),
-                )
+        if not self._is_source_channel(message):
+            self._log_wrong_chat(source_key, message)
             return
         if _is_bot_message(message):
+            return
+        if self._already_forwarded(message):
+            # Bale re-delivers the batch if the bot died before the offset was stored.
+            log.info("Bale message %s was already forwarded; skipping duplicate.", _message_id(message))
             return
 
         group_id = _media_group_id(message)
@@ -293,6 +398,8 @@ class Syncer:
         else:
             log.warning("Accepted Bale message %s produced no Telegram messages.", _message_id(message))
 
+    # ------------------------------------------------------------ media groups
+
     async def _buffer_media_group(
         self, bale: BaleClient, telegram: TelegramSender, message: dict, media_items: list[MediaItem], group_id: str
     ) -> None:
@@ -308,29 +415,64 @@ class Syncer:
             reply_to = self._reply_target(message)
             if reply_to is not None:
                 group["reply_to"] = reply_to
+        if any(entry["source"] == (chat_id, msg_id) for entry in group["entries"]):
+            return
         group["entries"].append({"source": (chat_id, msg_id), "items": media_items})
 
         task = group.get("task")
         if task and not task.done():
             task.cancel()
-        group["task"] = asyncio.create_task(self._flush_media_group_later(key))
+        new_task = asyncio.create_task(self._flush_media_group_later(key))
+        self._group_tasks.add(new_task)
+        new_task.add_done_callback(self._group_tasks.discard)
+        new_task.add_done_callback(self._log_task_error)
+        group["task"] = new_task
+
+    @staticmethod
+    def _log_task_error(task: asyncio.Task) -> None:
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            log.error("Media group flush failed: %s", exc, exc_info=exc)
 
     async def _flush_media_group_later(self, key: str) -> None:
         await asyncio.sleep(self.config.media_group_wait_seconds)
+        await self._flush_media_group(key)
+
+    async def _flush_all_pending(self) -> None:
+        for key in list(self.pending_groups.keys()):
+            group = self.pending_groups.get(key)
+            if not group:
+                continue
+            task = group.get("task")
+            if task and not task.done():
+                task.cancel()
+            try:
+                await self._flush_media_group(key)
+            except Exception:
+                log.exception("Could not flush pending media group %s during shutdown.", key)
+
+    async def _flush_media_group(self, key: str) -> None:
         group = self.pending_groups.pop(key, None)
         if not group:
             return
 
         all_media: list[MediaItem] = []
         source_for_each_item: list[tuple[str, str]] = []
+        seen_keys: set[str] = set()
         for entry in group["entries"]:
             for item in entry["items"]:
+                if item.unique_key in seen_keys:
+                    continue
+                seen_keys.add(item.unique_key)
                 all_media.append(item)
                 source_for_each_item.append(entry["source"])
 
-        downloaded = await self._download_items(group["bale"], all_media)
+        downloaded, skipped = await self._download_items(group["bale"], all_media)
+        caption = self._with_skip_notice(group["caption"], skipped)
         try:
-            ids = await group["telegram"].send_media_group(downloaded, group["caption"], reply_to_message_id=group.get("reply_to"))
+            ids = await group["telegram"].send_media_group(downloaded, caption, reply_to_message_id=group.get("reply_to"))
             if ids:
                 by_source: dict[tuple[str, str], list[int]] = defaultdict(list)
                 if len(ids) == len(source_for_each_item):
@@ -347,18 +489,11 @@ class Syncer:
         finally:
             self._cleanup(downloaded)
 
+    # ---------------------------------------------------------- edit / delete
+
     async def handle_edited_message(self, bale: BaleClient, telegram: TelegramSender, message: dict, source_key: str = "edited_message") -> None:
-        if not _is_source_channel(message, self.config):
-            if self.config.log_ignored_updates:
-                chat = message.get("chat") or {}
-                log.info(
-                    "Ignored Bale %s from another chat. expected=%s chat_id=%s username=%s type=%s",
-                    source_key,
-                    self.config.bale_channel_id,
-                    chat.get("id"),
-                    chat.get("username"),
-                    chat.get("type"),
-                )
+        if not self._is_source_channel(message):
+            self._log_wrong_chat(source_key, message)
             return
 
         chat_id, msg_id = _source_key(message)
@@ -377,9 +512,9 @@ class Syncer:
         text = _caption_or_text(message)
 
         if not media_items and not contact and not location and text:
-            edited = await telegram.edit_existing(telegram_ids, text)
-            if edited:
-                self.store.save(chat_id, msg_id, [telegram_ids[0]], "message")
+            edited_ids = await telegram.edit_existing(telegram_ids, text)
+            if edited_ids:
+                self.store.save(chat_id, msg_id, edited_ids, "message")
                 log.info("Edited Telegram message for Bale message %s", msg_id)
                 return
 
